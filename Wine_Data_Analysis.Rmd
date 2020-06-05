@@ -1,0 +1,449 @@
+---
+title: "Pràctica 2: Neteja i anàlisi de les dades - Anàlisi de vins"
+author: "Rigau, Pol. Tienda, Arnau"
+date: "13/05/2020"
+output:
+  pdf_document: default
+  html_document: 
+        number_sections: yes
+        toc: yes
+        toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Descripció del dataset
+
+En aquesta practica hem escollit el dataset “Red Wine Quality” disponible a la pagina web Kaggle i al repositori UCI. Es pot trobar en els següents enllaços:
+
+https://archive.ics.uci.edu/ml/datasets/wine+quality
+
+https://www.kaggle.com/uciml/red-wine-quality-cortez-et-al-2009
+
+Aquest dataset conté informació sobre diversos paràmetres químics resultants de l'analisis de vins blancs i negres de la regió portugesa 'Vinho verde' i una classificació segons la seva qualitat. 
+
+Amb aquestes dades es poden crear algoritmes per a la classificació de vins. Ens permet agrupar vins per les seves semblances i també determinar quins son els factors que afecten més a la seva qualitat. Així doncs, la variable classe és una nota del 0 al 10 que indica la qualitat del vi i sera la nostre indicador objectiu.
+
+# Integració i selecció de les dades
+
+En primer lloc, carreguem llibreries que s'usen per la pràctica.
+
+```{r}
+library(dplyr)
+library(fpc)
+library(ggplot2)
+library(C50)
+library(partykit)
+library(cluster)
+library(class) 
+```
+
+
+Es comennça l'anàlisi carregant les dades:
+
+```{r}
+wine <- read.csv(paste0(getwd(), '/winequality-red.csv'), header = TRUE)
+```
+
+Es mostren quins son els atributs:
+
+```{r}
+colnames(wine)
+```
+
+Tenim 11 descriptors i una classe, que és la **qualitat**.
+
+A continuació realitzem un primer anàlisi dels atributs que tenim: 
+
+```{r}
+str(wine)
+```
+
+A partir de la observació del Dataset determinem que tots els atributs poden ser descriptors potencials de la classe **quality**. De moment no descartarem cap dels disponibles. 
+
+Observem que totes les dades que tenim, excepte les de l'atribut objectiu **quality**, són númeriques. No és necessari canviar els tipus, sinó que podem treballar amb els d'origen.
+
+Si gràfiquem **quality** mitjançant un diagràma de barres per a veure el rang de valors disponibles, observem que només disposem de valors entre 3 i 8, en les proporcions seguents:
+
+```{r}
+ggplot(data = wine, aes(x = quality)) + geom_bar()
+```
+
+Per tant, no tenim valors de vins excelents o molt dolents entre la mostra.
+
+# Neteja de les dades
+
+## Zeros o elements buits
+
+Per a la neteja del dataset, ens fixarem en cel·les buides (valor "") i cel·les amb valor NA.
+
+```{r}
+colSums(is.na(wine), wine == "")
+```
+
+Les dades no contenen valors desconeguts. Pel que fa a valors igual a 0, no se'n realitza cap tractament especial, ja que són valors possibles que poden prendre alguns dels atributs. Per exemple, podem veure que per la variable àcid cítric tenim registres que tenen valor 0, però aquest resultat pot correspondre a una mesura real. 
+
+Si s'haguéssin detectats valors perduts, com estem tractant amb valors numèrics continus, es podrien haver realitzat diferents operacions. Les més interessants, segons la nostra opinió, seríen les dues següents:
+
+* Canviar els valors perduts pel valor de la mitjana de l'atribut. D'aquesta manera s'evitaria variar massa la distribució de probabilitat de la variable.
+
+* Utilitzar un mètode d'imputació com kNN, en el qual s'utilitzarien els valors dels k veïns més propers per a triar a quin grup pertany, i assignar-li un valor. Es poden utilitzar diferents mètriques de distància.
+
+## Outliers
+
+A continuació realitzarem una exploració dels outliers, pel que graficarem els bloxpot dels atributs númerics per a tenir una representació visual.
+
+```{r}
+# Seleccionem les variables contínues
+wine_cont <- select(wine,-'quality')
+graph_wine = par(mfrow = c(2,4))
+
+for (i in colnames(wine_cont)){
+    boxplot(wine[[i]], xlab = i)
+}
+
+```
+
+Si ens volem fer una idea del tamany dels quartils comparant les diferents variables, podem normalitzar-les i mostrar tots els boxplots en una mateixa figura.
+
+```{r}
+wine_norm<- scale(wine_cont,center=T,scale=T)
+boxplot(wine_norm,las = 2)
+```
+
+
+Observem que en la majoria de casos tenim valors extrems en la part de valors més elevada. Es decideix substituir els outliers pel valor de la mitjana de l'atribut.
+
+```{r}
+# Trobem els índex dels outliers de cada una de les variables contínues i el 
+# substituim per la mitjana de l'atribut
+
+remove_outliers <- function(x){
+  outliers <- boxplot.stats(x)$out
+  index <- x %in% outliers
+  x[index] <- mean(x)
+  return(x)
+}
+
+wine_cont <- sapply(wine_cont, remove_outliers)
+
+```
+
+Tornem a mostrar les dades normalitzades sense els outliers que acabem de substituir per les mitjanes.
+
+```{r}
+wine_norm<- scale(wine_cont,center=T,scale=T)
+boxplot(wine_norm,las = 2)
+```
+
+# Anàlisi de dades
+
+## Selecció de variables
+
+Per a seleccionar les variables que ens permeten definir la qualitat del vi, crearem un model de regressió lineal múltiple per observar quines són els atributs que guarden més relació amb la **qualitat**.
+
+```{r}
+# Calculem el model de regressió
+model <- lm(quality ~ fixed.acidity + volatile.acidity + citric.acid + residual.sugar + 
+              chlorides + free.sulfur.dioxide + total.sulfur.dioxide + density + pH + 
+              sulphates + alcohol, data=wine)
+summary(model)
+```
+
+A partir dels valors Pr(>|t|), podem veure la importància de cada variable per a la definició de la variable qualitat (relació entre variable dependent i variables explicatives). Observem que únicament hi ha 5 valors amb valors p inferiors a 0.01. Aquests **els considerarem atributs significatius per a la definició de la qualitat del vi**. Descartem la resta d'atributs.
+
+```{r}
+wine_signif = select(wine,c("volatile.acidity","chlorides","total.sulfur.dioxide",
+                            "sulphates","alcohol","quality"))
+
+model <- lm(quality ~ volatile.acidity + chlorides +  total.sulfur.dioxide 
+            + sulphates + alcohol, data=wine_signif)
+summary(model)
+```
+
+
+## Comprovació de la normalitat i homogeneïtat de la variància.
+
+A continuacio es farà un anàlisis de les dades disponibles. 
+
+```{r}
+summary(wine_signif)
+```
+
+Es realitza un altre tipus de gràfic, en aquest cas un histograma, per a observar la distribució de les dades. Aquest analisi, també ens ajudara a comprobar si segueixen una distribució normal.
+
+```{r}
+
+graph_wine = par(mfrow = c(2,3))
+
+for (i in colnames(wine_signif)){
+  hist(as.numeric(wine_signif[[i]]), xlab = i, main= i, col = 'grey')
+  if (!(i == 'quality')){
+    results_test = shapiro.test(wine[[i]])
+    print(paste('Variable: ', names(wine[i])))
+    print(results_test)
+  }
+}
+```
+
+S'observa, com ja s'havia vist en el bloxplot, les variables no presenten una distribució normal.
+Cap d'elles cumpleix la hipotesi nula del test de Shapiro-Wilk, pel que podem determinar que no compleixen la normalitat. El p-value es inferior al nivell de significació 0.05.
+
+Es realitza a continuació el test per a comprobar la homogeneïtat de les dades. Com que aquestes no compleixen la normalitat, es realitza el test de Fligner-Killeen.
+
+```{r}
+fligner.test(wine_signif)
+```
+
+Els resultats obtinguts són contraris a la hipotesi, obtenint un p-value inferior al nivell de significació 0.05, pel que podem certificar que les variables no compleixen homogeneïtat.
+
+## Aplicació de proves estadístiques per a comparar els grups de dades
+
+### Mètode 1 - Correlació entre variables
+
+A continuació s'estudiara la correlació de les dades, és a dir, la relació que tenen entre cada una d'elles. Per començar es farà de manera numèrica.
+
+```{r}
+cor(wine_signif)
+```
+
+Seguidament, visualitzarem diagrames de dispersió per parelles de variables, per analitzar de manera visual aquestes correlacions.
+
+```{r}
+pairs(wine_signif,lower.panel = NULL)
+```
+
+No observem correlacions molt altes entre variables, de manera que podem seguir utilitzant-les totes sense tenir problemes de multicolinealitat.
+
+Sobre el model de regressió lineal múltiple que hem creat, tenia un valor de $R^2$ = 0.35, de manera que únicament explicava el 35% de la variància de la variable qualitat.
+
+### Mètode 2 - Kmeans
+
+S'utilitzarà un mètode no supervisat per a poder determinar si podem agrupar els vins en diferents grups segons les seves propietats. Per a realitzar aquest 'clustering' hem escollit el mètode kmeans. 
+
+Per a realitzar l'anàlisi amb aquest mètode, en primer lloc necesitem tenir un set de dades no supervisat.
+
+```{r}
+wine_signif_ns <- wine_signif
+wine_signif_ns$quality <- NULL
+```
+
+Un cop tenim el data set preparat podem aplicar l'algoritme. Per a fer-ho, bé podem determinar el nombre de grups k que ens interesa o bé aplicar la funció pamk() que optimitza el nombre de grups més adient pel nostre dataset. 
+
+Aplicarem aquesta segona opció: 
+
+```{r}
+kmeans_wine<-pamk(wine_signif_ns)
+```
+
+Comprovem l'error que obtenim: 
+
+```{r}
+d  <- daisy(wine_signif_ns) 
+sil <- silhouette(kmeans_wine$pamobject, d)
+mean(sil[,3])
+```
+
+S'obté un precisió de 62%.
+
+Per a veure graficament els resultats del algoritme tornarem a observar les nostres variables significatives amb el gràfic *pairs()*, però aquest cop colorejant segons a quin grup dels obtingut pertany. 
+
+```{r}
+wine_signif_ns$group <- as.factor(kmeans_wine$pamobject$clustering)
+pairs(wine_signif, lower.panel = NULL, col=wine_signif_ns$group)
+```
+
+Observem que la variable que té mes influencia en la classificació dels grups es **total.sulfur.dioxide**. Els nostres grups semblen dividir-se segons la quantitat de diòxid de sulfur present al vi. En cambi, no segueixen cap patró respecte les altres variables.
+
+Per a comprobar visualment de forma més precisa si aquesta agrupació és representativa per a determinar la qualitat dels vins, realitzarem un histograma amb només aquest atribut. 
+
+```{r}
+graph <- ggplot(wine_signif_ns[1:nrow(wine_signif),], 
+                aes(x=wine_signif$quality, fill=wine_signif_ns$group)) + geom_bar()
+graph + scale_fill_discrete(name = "Group") + labs(x = 'Quality') + 
+        scale_x_continuous(breaks = c(seq(3,8)))
+```
+
+Observem que si bé hi ha una lleugera tendencia a augmentar la proporció del grup 1 com major és la qualitat, aquesta agrupació no ens serviria per determinar-ho amb seguretat. 
+Per a obtenir un algoritme que pugui determinar quines són les variables esencials i els seus valors per a conseguir una bona qualitat farem servir un mètode supervisat basat en un arbre de decisió. El primer pas per a realitzar aquest algoritme és separar les dades en les variables i en l'objectiu.
+
+### Mètode 3 - Arbres de decisió
+
+```{r}
+y <- as.factor(wine_signif$quality)
+X <- wine_signif[-6] 
+```
+
+També es divideix el conjunt de dades en dos grups, el de entrenament i el de test. Hem seleccionat que el d'entrenament representi 2/3 parts del total de dades i el de test la resta.
+
+```{r}
+set.seed(150)
+indexes = sample(1:nrow(wine_signif), size=floor((2/3)*nrow(wine_signif)))
+trainX <- X[indexes,]
+trainy <- y[indexes]
+testX  <- X[-indexes,]
+testy  <- y[-indexes]
+```
+
+Com que hem realitzat una partició aleatoria, comprobem que les dades que tenim no siguin esbiaixades fent un petit anàlisis.  
+
+```{r}
+summary(trainX)
+levels(trainy)
+```
+
+D'aquesta manera podem determinar que la mitja per a cada variable és semblant a la que teniem abans del fraccionament i que disposem de totes les clases de qualitat presents a les dades originals. 
+
+Utilitzarem l'algoritme d'arbre de decisió C5.0 de la llibreria C50, carregada previament.
+
+Abans de realitzar-ho, especificarem uns paràmetres de control *pre-prunning*, per a evitar que sigui massa especific. 
+
+```{r}
+ctrl = C5.0Control(CF = 0.9, minCases = 6)
+model <- C50::C5.0(trainX, trainy, rules=TRUE, control = ctrl)
+summary(model)
+```
+
+De les 1066 dades que tenia el set d'entrenament, l'arbre de decisó ha classificat correctament 728 i incorrectament 308, el que representa un error del 28,9%. 
+Ha trobat 25 regles de classificació en que principalment intervenen **alcohol** i **sulphates** i en menor mesura **volatile.acidity** i **total.sulfur.dioxide**. La variable **chloride** gairebé no té afectació.
+
+A continuació comprovarem la qualitat del model amb les dades de test que teniem reservades.
+
+```{r}
+predicted_model <- predict(model, testX, type="class")
+table(testy,Predicted=predicted_model)
+
+
+sprintf("La precisió de l'arbre és: %.4f %%",100*sum(predicted_model == testy) 
+        / length(predicted_model))
+
+```
+
+Obtenim la matriu de confusió i la precisió de l'arbre. Veiem que aquesta precisió és molt baixa ja que només encerta aproximadament la meitat de les prediccions que realitza.
+
+Valorem la opció de perdre informació de les dades per a millorar la seva precisió. Per tant, agruparem els nivells de qualitat que tenim en tres grups, que pasaran a ser **low quality** per aquells que eren de qualitat 3 o 4, **medium quality** pels de 5 o 6 i **high quality** pels de 7 o 8. 
+
+```{r}
+new_quality <- c('low quality','low quality','medium quality', 'medium quality', 
+                    'high quality', 'high quality'  )
+levels(trainy) <- new_quality
+levels(testy) <- new_quality
+```
+
+Els nous valors es visualitzen de la seguent manera.
+
+```{r}
+ggplot(data.frame(trainy), aes(x=trainy)) +
+  geom_bar() + xlab('Quality')
+```
+
+És evident que tenim una gran quantitat de dades que pertanyen al grup de 'medium quality' (qualitat intermitja del vi) i poques a qualitat del vi bó o dolent. Ens sembla una bona representació de la realitat ja que és habitual trobar vins blancs acceptables, però més díficil trobar molt dolent o molt bons.
+
+```{r}
+model <- C50::C5.0(trainX, trainy, rules=TRUE, control = ctrl)
+model
+summary(model)
+```
+
+En aquest cas hem trobat una percentatge d'errors molt més baix que en el primer arbre. De 1066 casos, 139 eren incorrectes, el que representa un 13% d'error. Hem trobat 8 regles, el que també representa una simplificació respecte a les 25 anteriors.
+
+Ara que tenim unes dades més manipulables, graficarem l'algoritme per a fer un analisis visual. 
+
+```{r}
+model <- C50::C5.0(trainX, trainy)
+
+#Es gràfica el model complet
+plot(model, gp = gpar(fontsize = 9), terminal_panel = node_terminal)
+
+#S'amplien les dues branques principals per a tenir una millor comprensió
+
+model %>% plot(subtree = 4)
+model %>% plot(subtree = 13)
+
+```
+
+En primer lloc, es veu que l'algoritme que tenim no classifica cap vi com a 'low quality'. Tots els que eren d'aquesta classe s'engloben dintre de **medium quality**.
+Per a obtenir un vi d'alta qualitat, el més probable és que presenti una quantitat d'alcohol i de sulfats alts i clorurs i acidesa baixos.
+
+Per a finalitzar, realitzem la comprobació amb les dades de test
+
+```{r}
+predicted_model <- predict(model, testX, type="class")
+table(testy,Predicted=predicted_model)
+
+
+sprintf("La precisió de l'arbre és: %.4f %%", 100*sum(predicted_model == testy) 
+        / length(predicted_model))
+```
+
+Amb aquest nou arbre de decisió obtenim uan precisió de 84,05%, molt més elevada que amb 6 nivells. 
+
+### Mètode 4 - knn
+
+A continuació treballarem amb l'algorisme supervisat knn. Seguirem treballant amb les dades discretitzades, és a dir, amb tres possibles classes. Veurem si és possible superar el 84% de precisió obtingut amb els arbres de decisió.
+
+```{r}
+# Realitzem l'execució de l'algorisme per a diferents valors de k. S'escull el millor
+precisio = 1
+for (i in 10:30){
+  pr <- knn(trainX,testX,cl=trainy,k=i)
+  ## Creem matriu de confusió
+  perc <- table(pr,testy)
+  precisio[i-10] = (perc[1,1]+ perc[2,2] + perc[3,3]) / sum(perc)
+  print(sprintf("La precisió de l'algorisme knn és %.2f %% amb k = %s", 
+                100*precisio[i-10],i))
+}
+```
+
+
+```{r}
+# Mostrem l'evolució de la precisió en funció del valor de k
+plot(c(11:30), precisio, type="b", xlab="Valor de k", ylab="Precisió")
+```
+
+A partir de valor de k = 24 aproximadament, ja no obtenim millora en els resultats. Veiem que els resultats són lleugerament pitjors que amb arbres de decisió, tot i que es considera que segueixen sent prou bons (arriben al 82% de precisió). Mostrem la matriu de confusió per al valor de k=24.
+
+```{r}
+pr <- knn(trainX,testX,cl=trainy,k=24)
+
+## Creem matriu de confusió
+table(pr,testy)
+```
+
+Podem veure que l'algorisme té molts problemes per classificar vins de baixa i alta qualitat. Això és degut a que les dades inicials disposen de molts pocs valors d'aquestes qualitats, comparats amb el nombre de casos que són de mitja qualitat. Per a millors resultats, necessitaríem una mostra més diversa en el que tinguéssim aproximadament el mateix nombre de registres per a les 3 qualitats.
+
+# Conclusions
+
+A partir de l'anàlisi realitzat, s'han pogut extreure les següents conclusions.
+
+* Disposàvem d'onze atributs al començar l'anàlisi, dels quals s'ha pogut detectar que **únicament 5 d'ells** tenien rellavància a l'hora de definir la qualitat del vi. Aquestes 5 variables **expliquen un 35% de la variància de la variable qualitat**. Les variables són **volatile.acidiy, chlorides, total.sulfur.dioxide", sulphates** i **alcohol**.
+
+* No s'han detectat valors buits ni "NA", però sí outliers. **L'estratègia ha estat substituir-los per la mitja de l'atribut.**
+
+* No s'ha detectat cap correlació entre les variables utilitzades.
+
+* Utilitzant un algorisme no supervisat, en aquest cas **K-means**, s'ha obtingut una **mala classificació**. Té sentit tenint en compte que ha de classificar en 6 classes diferents, i que les dades d'entrenament són molt poc heterogènies (hi ha molts registres d'una classe determinada, i pocs de les altres)
+
+* Utilitzant **arbres de decisió**, s'aconsegueix una **precisió propera al 50%**. No ens és útil per a realitzar prediccions.
+
+* Tenint en compte el punt anterior, s'ha decidit **discretitzar les 6 categoríes** (notes de qualitat del 3 al 8) **en 3** (low quality, medium quality, high quality). Treballant amb només 3 classes, s'obté una bona **precisió del 84%.**
+
+* Finalment, amb l'algorisme **Knn**, s'ha buscat el valor òptim de k, **k=24**, i s'ha obtingut **una precisió de 82%**.
+
+* De manera resumida, s'ha buscat aquelles variables que descriuen la majoria de la variància de la classe qualitat, i s'han provat algorismes supervisats i no supervisats per a predir noves mostres d'un set de test reservat per a fer les proves. Pel que fa als algorismes supervisats, primer s'ha discretitzat la variable de classe per reduir de 6 a 3 possibles valors. Amb aquest canvi, s'ha arribat a precisions de predicció del 84% amb arbres de decisió.
+
+* S'ha determinat, a traves de l'arbre de decisió que els parametres per a obtenir un vi de bona qualitat es tenir uns nivells de sulfats i una graduació alcoholica alts i acidesa i concentració de clorurs baixos.
+
+# Bibliografía.
+
+Red Wine Quality. https://www.kaggle.com/uciml/red-wine-quality-cortez-et-al-2009/undefined. 2018
+
+P. Cortez, A. Cerdeira, F. Almeida, T. Matos and J. Reis. Modeling wine preferences by data mining from physicochemical properties. In Decision Support Systems, Elsevier, 47(4):547-553, 2009.
+
+# Contribucions
+
+![Contribucions](C:\Users\Pol\Desktop\MASTER\SEMESTRE 2\Tipologia i cicle de vida de les dades\Practiques\Practica 2\Contribucions.PNG)
+
+
